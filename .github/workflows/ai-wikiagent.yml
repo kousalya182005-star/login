@@ -1,0 +1,110 @@
+name: AI Autonomous Wiki Agent
+
+on:
+  issues:
+    types: [opened, edited]
+
+permissions:
+  contents: write
+  issues: write
+
+jobs:
+  ai-update-wiki:
+    if: startsWith(github.event.issue.title, 'docs:') || startsWith(github.event.issue.title, 'wiki:')
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout Main Repo
+        uses: actions/checkout@v4
+
+      - name: Checkout Wiki Repo
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ github.repository }}.wiki
+          path: wiki-target
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install Google GenAI SDK
+        run: pip install google-genai
+
+      - name: Run AI Documentation Writer
+        env:
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          ISSUE_TITLE: ${{ github.event.issue.title }}
+          ISSUE_BODY: ${{ github.event.issue.body }}
+        run: |
+          python - << 'EOF'
+          import os
+          from google import genai
+
+          client = genai.Client(api_key=os.environ["GEMINI_API_KEY"])
+
+          wiki_file = "wiki-target/Home.md"
+          if os.path.exists(wiki_file):
+              with open(wiki_file, "r") as f:
+                  current_doc = f.read()
+          else:
+              current_doc = "# Login Application Documentation\n\n## Main Features\n"
+
+          prompt = f"""
+          You are an autonomous technical documentation writer.
+          Update the following GitHub Wiki documentation based on the requested update.
+
+          CURRENT DOCUMENTATION:
+          {current_doc}
+
+          REQUESTED UPDATE:
+          Title: {os.environ.get('ISSUE_TITLE')}
+          Details: {os.environ.get('ISSUE_BODY')}
+
+          Instructions:
+          - Output ONLY the full updated Markdown file.
+          - Do not include backtick blocks (```markdown) or conversational intro/outro text.
+          """
+
+          response = client.models.generate_content(
+              model='gemini-2.5-flash',
+              contents=prompt
+          )
+
+          with open(wiki_file, "w") as f:
+              f.write(response.text.strip())
+
+          # Also update docs/README.md in main repo
+          os.makedirs("docs", exist_ok=True)
+          with open("docs/README.md", "w") as f:
+              f.write(response.text.strip())
+          EOF
+
+      - name: Commit & Publish Directly to Live Wiki
+        run: |
+          cd wiki-target
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add .
+          git commit -m "docs: auto-updated by AI Agent via Issue #${{ github.event.issue.number }}" || exit 0
+          git push origin master || git push origin main
+
+      - name: Commit & Push to Main Repo docs/
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add docs/
+          git commit -m "docs: sync docs from Issue #${{ github.event.issue.number }}" || exit 0
+          git push origin main
+
+      - name: Comment on Issue
+        uses: actions/github-script@v7
+        with:
+          script: |
+            github.rest.issues.createComment({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: context.issue.number,
+              body: ' The AI Agent has processed your request and automatically updated the live **Wiki**.'
+            })
